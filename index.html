@@ -2699,16 +2699,20 @@ function parseLinkedInXlsx(arrayBuffer) {
   const sheet = wb.Sheets[topPostsSheetName];
   const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
 
-  // Find header row (the one containing 'Post URL')
+  // Find header row (the one containing 'Post URL' or a near-variant).
+  // Scans the first 25 rows (was 10). LinkedIn occasionally adds preamble
+  // rows above the headers, and the broader scan absorbs that without
+  // forcing a code change every time the export format shifts.
   let headerRowIdx = -1;
-  for (let i = 0; i < Math.min(rows.length, 10); i++) {
-    if (rows[i].some(cell => typeof cell === 'string' && /post\s*url/i.test(cell))) {
+  const headerRegex = /post\s*(url|link)/i;
+  for (let i = 0; i < Math.min(rows.length, 25); i++) {
+    if (rows[i].some(cell => typeof cell === 'string' && headerRegex.test(cell))) {
       headerRowIdx = i;
       break;
     }
   }
   if (headerRowIdx === -1) {
-    throw new Error('Could not find header row with Post URL in the TOP POSTS sheet.');
+    throw new Error('Could not find a header row containing "Post URL" or "Post link" in the first 25 rows of the TOP POSTS sheet. LinkedIn may have changed the export format. Open the file in Excel and check what the header row looks like.');
   }
 
   const headers = rows[headerRowIdx].map(c => (c || '').toString().trim());
@@ -2890,7 +2894,19 @@ function showImportModal() {
 
   const matchCount = pendingImport.matches.length;
   const unmatchedCount = pendingImport.unmatched.length;
-  summary.innerHTML = `<strong>${matchCount}</strong> posts matched. <strong>${unmatchedCount}</strong> rows could not be matched. Review and apply.`;
+  const totalRows = matchCount + unmatchedCount;
+
+  if (totalRows === 0) {
+    // Parser returned no rows at all. Bad file or empty TOP POSTS sheet.
+    summary.innerHTML = `<strong>No rows were parsed from the file.</strong> The file may be missing a TOP POSTS sheet, or its columns don't match what the importer expects. Try re-downloading from LinkedIn Analytics.`;
+  } else if (matchCount === 0) {
+    // Parser worked but nothing in this Post Studio matches any URL.
+    // This is the most common "import didn't work" case and the previous
+    // summary was misleadingly neutral about it.
+    summary.innerHTML = `<strong>Parsed ${totalRows} posts from the file, but 0 matched posts saved here.</strong> The importer enriches posts that already exist in this Post Studio's tracker (saved via "Save to tracker" on Step 3). If you've been working through the cockpit or Notion only, this tracker is empty. Either save posts here first, or use the Apply changes button to create new tracker entries from the unmatched rows.`;
+  } else {
+    summary.innerHTML = `<strong>${matchCount}</strong> posts matched. <strong>${unmatchedCount}</strong> rows could not be matched. Review and apply.`;
+  }
 
   let html = '';
   if (matchCount > 0) {
