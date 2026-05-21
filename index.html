@@ -2901,11 +2901,11 @@ function showImportModal() {
     summary.innerHTML = `<strong>No rows were parsed from the file.</strong> The file may be missing a TOP POSTS sheet, or its columns don't match what the importer expects. Try re-downloading from LinkedIn Analytics.`;
   } else if (matchCount === 0) {
     // Parser worked but nothing in this Post Studio matches any URL.
-    // This is the most common "import didn't work" case and the previous
-    // summary was misleadingly neutral about it.
-    summary.innerHTML = `<strong>Parsed ${totalRows} posts from the file, but 0 matched posts saved here.</strong> The importer enriches posts that already exist in this Post Studio's tracker (saved via "Save to tracker" on Step 3). If you've been working through the cockpit or Notion only, this tracker is empty. Either save posts here first, or use the Apply changes button to create new tracker entries from the unmatched rows.`;
+    // Apply changes will create new tracker rows from every unmatched row,
+    // so this is no longer a dead end — it's a bootstrap import.
+    summary.innerHTML = `<strong>Parsed ${totalRows} posts from the file. 0 matched existing tracker rows.</strong> Click <strong>Apply changes</strong> to create ${unmatchedCount} new tracker entries from these rows. Each new row will have metrics filled in, with a placeholder body you can paste real text into later.`;
   } else {
-    summary.innerHTML = `<strong>${matchCount}</strong> posts matched. <strong>${unmatchedCount}</strong> rows could not be matched. Review and apply.`;
+    summary.innerHTML = `<strong>${matchCount}</strong> existing post${matchCount === 1 ? '' : 's'} will be updated. <strong>${unmatchedCount}</strong> new tracker row${unmatchedCount === 1 ? '' : 's'} will be created from the unmatched rows. Click Apply changes to proceed.`;
   }
 
   let html = '';
@@ -2945,6 +2945,7 @@ async function confirmImport() {
   if (!pendingImport) return;
   const posts = loadPosts();
 
+  // 1) Update existing tracker rows with new metrics from the CSV.
   for (const m of pendingImport.matches) {
     const post = posts.find(p => p.id === m.post.id);
     if (!post) continue;
@@ -2960,18 +2961,69 @@ async function confirmImport() {
     }
   }
 
+  // 2) Create new tracker rows from unmatched CSV rows. This means the
+  //    importer can now bootstrap the tracker from a LinkedIn analytics
+  //    export, not just enrich rows you'd already saved. Posts get a
+  //    placeholder body that you can paste real text into later via
+  //    the row's expand panel.
+  let createdCount = 0;
+  if (Array.isArray(pendingImport.unmatched)) {
+    // Use a base timestamp + offset so generated IDs are unique per row.
+    const baseTs = Date.now();
+    pendingImport.unmatched.forEach((r, idx) => {
+      if (!r || !r.url) return;
+      const newPost = {
+        id: (baseTs + idx).toString(),
+        date: r.date || new Date().toISOString().split('T')[0],
+        seed: '',
+        hook: '',
+        hookLabel: '',
+        format: '',
+        audience: '',
+        length: '',
+        ctaStyle: '',
+        pillar: '',
+        post: '[Imported from LinkedIn CSV — paste the post body here]',
+        status: 'published',
+        publishDate: r.date || null,
+        linkedinUrl: r.url,
+        thread: '',
+        topic: '',
+        ctaType: null,
+        notes: 'Created automatically by CSV import on ' + new Date().toISOString().split('T')[0],
+        notionPageId: null,
+        metrics: {
+          impressions: r.impressions != null ? r.impressions : null,
+          reactions: r.reactions != null ? r.reactions : (r.engagements != null ? r.engagements : null),
+          comments: r.comments != null ? r.comments : null,
+          shares: r.shares != null ? r.shares : null,
+          saves: null,
+          reposts: null,
+          clicks: r.clicks != null ? r.clicks : null,
+          followsGained: null,
+          profileViews: null
+        }
+      };
+      posts.unshift(newPost);
+      createdCount++;
+    });
+  }
+
   savePosts(posts);
   renderTracker();
 
-  // Re-sync updated posts to Notion if they have a Notion page ID
+  // 3) Re-sync updated posts to Notion if they already have a Notion page ID.
+  //    Newly created tracker rows do not — they can be synced later via the
+  //    Sync to Notion button on each row.
   const toSync = pendingImport.matches
     .map(m => posts.find(p => p.id === m.post.id))
     .filter(p => p && p.notionPageId);
 
+  const updatedCount = pendingImport.matches.length;
   closeImportModal();
 
+  let syncedCount = 0;
   if (toSync.length > 0) {
-    let synced = 0;
     for (const post of toSync) {
       try {
         await fetch('/api/notion-sync', {
@@ -2979,11 +3031,17 @@ async function confirmImport() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(post)
         });
-        synced++;
+        syncedCount++;
       } catch {}
     }
-    alert(`Imported ${pendingImport ? 0 : toSync.length} matches. Synced ${synced} updates to Notion.`);
   }
+
+  const parts = [];
+  if (updatedCount > 0) parts.push(`Updated ${updatedCount} existing post${updatedCount === 1 ? '' : 's'}`);
+  if (createdCount > 0) parts.push(`created ${createdCount} new tracker row${createdCount === 1 ? '' : 's'}`);
+  if (syncedCount > 0) parts.push(`synced ${syncedCount} update${syncedCount === 1 ? '' : 's'} to Notion`);
+  const message = parts.length > 0 ? parts.join(', ') + '.' : 'No changes applied.';
+  alert(message);
 }
 
 async function syncPostToNotion(postId) {
@@ -3229,6 +3287,110 @@ async function roughenPost() {
     if (loader) loader.classList.remove('show');
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// GOTO11_BACKFILL — bridge for the Chrome extension
+// ─────────────────────────────────────────────────────────────────────
+// The "Go To 11 LinkedIn Cockpit" Chrome extension calls these methods
+// via chrome.scripting.executeScript when you click "Backfill post
+// bodies" in its popup. The extension visits each URL in turn, scrapes
+// the post body off the live page, and pushes it back here. Bodies are
+// persisted via the existing posts localStorage.
+//
+// Read flow:
+//   extension → window.GOTO11_BACKFILL.getUrlsNeedingBody()
+//             → returns [{ id, url }] for every tracker post that has a
+//               linkedinUrl but a placeholder/empty body.
+//
+// Write flow:
+//   extension → window.GOTO11_BACKFILL.setBody(url, bodyText)
+//             → finds the matching post by linkedinUrl, sets post.post,
+//               saves to localStorage, re-renders the tracker.
+//
+// All operations are synchronous and idempotent. Posts that already
+// have real bodies are never overwritten unless force=true.
+
+window.GOTO11_BACKFILL = {
+  version: '0.2.0',
+  isReady: true,
+
+  getUrlsNeedingBody: function () {
+    var posts = loadPosts();
+    var needs = [];
+    var placeholderRe = /^\[Imported from LinkedIn CSV/i;
+    for (var i = 0; i < posts.length; i++) {
+      var p = posts[i];
+      if (!p.linkedinUrl) continue;
+      var body = (p.post || '').trim();
+      if (!body || placeholderRe.test(body)) {
+        needs.push({ id: p.id, url: p.linkedinUrl, currentBody: body });
+      }
+    }
+    return needs;
+  },
+
+  getAllPosts: function () {
+    return loadPosts().map(function (p) {
+      return { id: p.id, url: p.linkedinUrl, body: p.post || '' };
+    });
+  },
+
+  setBody: function (url, bodyText, opts) {
+    opts = opts || {};
+    var force = !!opts.force;
+    if (!url || typeof bodyText !== 'string') return { ok: false, error: 'url and bodyText required' };
+    var clean = bodyText.trim();
+    if (!clean) return { ok: false, error: 'bodyText empty' };
+
+    var posts = loadPosts();
+    var match = null;
+    var normUrl = (typeof normaliseUrl === 'function') ? normaliseUrl(url) : url;
+    for (var i = 0; i < posts.length; i++) {
+      var p = posts[i];
+      if (!p.linkedinUrl) continue;
+      var pNorm = (typeof normaliseUrl === 'function') ? normaliseUrl(p.linkedinUrl) : p.linkedinUrl;
+      if (pNorm === normUrl) { match = p; break; }
+    }
+    if (!match) return { ok: false, error: 'no tracker row matches this url' };
+
+    var existing = (match.post || '').trim();
+    var placeholderRe = /^\[Imported from LinkedIn CSV/i;
+    if (existing && !placeholderRe.test(existing) && !force) {
+      return { ok: false, error: 'body already set; pass {force: true} to overwrite' };
+    }
+
+    match.post = clean;
+    match.notes = (match.notes || '') + (match.notes ? ' • ' : '') +
+                  'Body backfilled by extension on ' + new Date().toISOString().split('T')[0];
+    savePosts(posts);
+    if (typeof renderTracker === 'function') {
+      try { renderTracker(); } catch (e) {}
+    }
+    return { ok: true, id: match.id };
+  },
+
+  stats: function () {
+    var posts = loadPosts();
+    var total = posts.length;
+    var withUrl = 0;
+    var withBody = 0;
+    var needBackfill = 0;
+    var placeholderRe = /^\[Imported from LinkedIn CSV/i;
+    for (var i = 0; i < posts.length; i++) {
+      var p = posts[i];
+      if (p.linkedinUrl) withUrl++;
+      var b = (p.post || '').trim();
+      if (b && !placeholderRe.test(b)) withBody++;
+      if (p.linkedinUrl && (!b || placeholderRe.test(b))) needBackfill++;
+    }
+    return { total: total, withUrl: withUrl, withBody: withBody, needBackfill: needBackfill };
+  }
+};
+
+// Friendly heads-up in the console so it's obvious the bridge is live.
+try {
+  console.log('[Go To 11] GOTO11_BACKFILL bridge ready. Stats:', window.GOTO11_BACKFILL.stats());
+} catch (e) {}
 
 </script>
 </body>
