@@ -1,4 +1,5 @@
 import type { Context, Config } from "@netlify/functions";
+import { wrapHandler } from './_cost-logger.mjs';
 
 const NOTION_API = "https://api.notion.com/v1/pages";
 const NOTION_VERSION = "2022-06-28";
@@ -19,7 +20,7 @@ const CTA_MAP: Record<string, string> = {
   none: "No CTA",
 };
 
-export default async (req: Request, context: Context) => {
+const _handler = async (req: Request, context: Context) => {
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "POST only" }), { status: 405 });
   }
@@ -162,6 +163,11 @@ export default async (req: Request, context: Context) => {
     );
   }
 };
+
+export default wrapHandler(_handler, {
+  project: '30-li-post-studio-goto11',
+  function_name: 'notion-sync',
+});
 
 export const config: Config = {
   path: "/api/notion-sync",
