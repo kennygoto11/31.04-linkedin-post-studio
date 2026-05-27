@@ -1905,6 +1905,15 @@ async function callClaude(prompt) {
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message || 'API error');
+  // Fire-and-forget cost logging. Never blocks the user-facing response.
+  if (data?.usage) {
+    fetch('/api/log-anthropic', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usage: data.usage, model: data.model }),
+      keepalive: true,
+    }).catch(() => {});
+  }
   return data.content.find(b => b.type === 'text')?.text || '';
 }
 
@@ -3279,6 +3288,14 @@ async function roughenPost() {
       throw new Error(e?.error?.message || `API error (${res.status})`);
     }
     const data = await res.json();
+    if (data?.usage) {
+      fetch('/api/log-anthropic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usage: data.usage, model: data.model }),
+        keepalive: true,
+      }).catch(() => {});
+    }
     textarea.value = data.content[0].text.trim();
     if (typeof updateWC === 'function') updateWC();
   } catch (e) {
