@@ -3,7 +3,7 @@
 ## What you're building
 
 A single-page web app for Kenny Solway (Go To 11) to write and track LinkedIn posts.
-Live site: https://goto11-li-post-dashboard.netlify.app/
+Live site: https://goto11-li-post-studio.netlify.app/
 
 The current live site is a generic LinkedIn dashboard. Replace it entirely with the Post Studio described below.
 
